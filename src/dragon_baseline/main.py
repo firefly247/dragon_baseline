@@ -661,6 +661,60 @@ class DragonBaseline(NLPAlgorithm):
             else:
                 return self.predict_huggingface(df=df)
 
+def ensemble_predictions(
+        pred_list: list[pd.DataFrame],
+        problem_type: ProblemType,
+        threshold: float = 0.5
+    ) -> pd.DataFrame:
+    
+    df_base = pred_list[0].copy()
+    key = df_base.columns[-1]  # prediction column name
+
+    if problem_type in [
+        ProblemType.SINGLE_LABEL_REGRESSION,
+        ProblemType.MULTI_LABEL_REGRESSION
+    ]:
+        # 값 평균
+        df_base[key] = sum(df[key] for df in pred_list) / len(pred_list)
+
+    elif problem_type == ProblemType.SINGLE_LABEL_BINARY_CLASSIFICATION:
+        # 확률 평균 후 threshold 적용
+        avg_probs = sum(df[key] for df in pred_list) / len(pred_list)
+        df_base[key] = (avg_probs > threshold).astype(int)
+
+    elif problem_type == ProblemType.MULTI_LABEL_BINARY_CLASSIFICATION:
+        # sigmoid 결과 평균 후 threshold 적용
+        df_base[key] = [
+            (np.mean([df[key].iloc[i] for df in pred_list], axis=0) > threshold).astype(int).tolist()
+            for i in range(len(df_base))
+        ]
+
+    elif problem_type == ProblemType.SINGLE_LABEL_MULTI_CLASS_CLASSIFICATION:
+        # Hard voting (최빈값)
+        df_base[key] = [
+            pd.Series([df[key].iloc[i] for df in pred_list]).mode().iloc[0] # 최빈값 추출
+            for i in range(len(df_base))
+        ]
+
+    elif problem_type in [
+        ProblemType.SINGLE_LABEL_NER,
+        ProblemType.MULTI_LABEL_NER
+    ]:
+        # Token 단위 Hard Voting
+        def majority_vote_tokenwise(token_lists):
+            result = []
+            for tokens in zip(*token_lists):  # i번째 토큰들을 모아서
+                result.append(pd.Series(tokens).mode().iloc[0])
+            return result
+
+        df_base[key] = [
+            majority_vote_tokenwise([df[key].iloc[i] for df in pred_list])
+            for i in range(len(df_base))
+        ]
+    else:
+        raise ValueError(f"Unsupported problem type: {problem_type}")
+
+    return df_base
 
 if __name__ == "__main__":
     # Note: to debug (outside of Docker), you can set the input and output paths.
@@ -675,8 +729,45 @@ if __name__ == "__main__":
         "Task108_Example_sl_ner-fold0",
         "Task109_Example_ml_ner-fold0",
     ]:
-        DragonBaseline(
-            input_path=Path(f"test-input/{job_name}"),
-            output_path=Path(f"test-output/{job_name}"),
-            workdir=Path(f"test-workdir/{job_name}"),
-        ).process()
+        input_path = Path(f"test-input/{job_name}")
+        output_path = Path(f"test-output/{job_name}")
+    
+        # 모델별 workdir
+        workdir1 = Path(f"test-workdir/{job_name}_model1")
+        workdir2 = Path(f"test-workdir/{job_name}_model2")
+        
+        # 모델 1
+        model1 = DragonBaseline(input_path=input_path, output_path=output_path, workdir=workdir1, model_name="distilbert-base-multilingual-cased")
+        model1.load()
+        model1.analyze()
+        model1.preprocess()
+        model1.train()
+        pred1 = model1.predict(df=model1.df_test)
+
+        # 모델 2
+        model2 = DragonBaseline(input_path=input_path, output_path=output_path, workdir=workdir2, model_name="xlm-roberta-base")
+        model2.load()
+        model2.analyze()
+        model2.preprocess()
+        model2.train()
+        pred2 = model2.predict(df=model1.df_test)  # model1과 같은 test 사용
+
+        # 모델 3
+        model3 = DragonBaseline(input_path=input_path, output_path=output_path, workdir=workdir2, model_name="allenai/longformer-base-4096")
+        model3.load()
+        model3.analyze()
+        model3.preprocess()
+        model3.train()
+        pred3 = model3.predict(df=model1.df_test)  # model1과 같은 test 사용
+
+        ensemble_pred = ensemble_predictions([pred1, pred2, pred3], model1.task.target.problem_type)
+
+        # 저장 및 검증
+        model1.save(ensemble_pred)
+        model1.verify_predictions()        
+
+        # DragonBaseline(
+        #     input_path=Path(f"test-input/{job_name}"),
+        #     output_path=Path(f"test-output/{job_name}"),
+        #     workdir=Path(f"test-workdir/{job_name}"),
+        # ).process()
