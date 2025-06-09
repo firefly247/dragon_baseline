@@ -12,8 +12,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from dragon_baseline.main import DragonBaseline
+from dragon_baseline.main import DragonBaseline, ensemble_predictions
 
 __all__ = [
     "DragonBaseline",
+    "ensemble_predictions",
 ]
